@@ -1,25 +1,26 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Form, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, File, Form, HTTPException, Depends, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Template
 import uvicorn
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import select
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from datetime import date
-from typing import Annotated
+from schemas import *
+from utils import *
+from typing import Annotated, Optional
 from models.mainModels import *
 from pathlib import Path
-from authx import AuthX, AuthXConfig, TokenPayload
+from authx import AuthX, AuthXConfig
 
+# DB init
 engine = create_async_engine('sqlite+aiosqlite:///src/books.db')
 new_session = async_sessionmaker(engine, expire_on_commit=False, autocommit=False)
 
 @asynccontextmanager
-async def lifespan(app: FastAPI): #Startup/shutdown code
+async def lifespan(app: FastAPI): # Startup/shutdown code  
     # Startup code
     async with engine.begin() as conn:
         # await conn.run_sync(Base.metadata.drop_all)
@@ -31,37 +32,18 @@ async def lifespan(app: FastAPI): #Startup/shutdown code
 
 app = FastAPI(lifespan=lifespan)
 
-templates = Jinja2Templates(directory="src/templates") #Обьявляется путь к templates 
+# Templates path
+templates = Jinja2Templates(directory="src/templates") 
 
-BASE_DIR = Path(__file__).parent #схраняем путь до папки static
-app.mount(path="/static", app=StaticFiles(directory=BASE_DIR / "static"), name="static") #Обьявляется static
+# Static path
+BASE_DIR = Path(__file__).parent 
+app.mount(path="/static", app=StaticFiles(directory=BASE_DIR / "static"), name="static") # Init static
 
 async def get_session():
     async with new_session() as session:        
         yield session
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
-
-class NewBook(BaseModel):
-    title:str
-    author:str
-    date:date
-
-class BookSchema(NewBook):
-    id:int
-
-class BookResponse(BaseModel):
-    id:int
-    title:str
-    author:str
-    date:date
-
-    class Config:
-        from_attributes = True
-
-class UserLoginModel(BaseModel):
-    username:str
-    password:str
 
 config = AuthXConfig()
 config.JWT_SECRET_KEY = "mysecretkey"
@@ -87,38 +69,53 @@ async def index_post(request: Request, session: SessionDep, search: Annotated[st
     books = [BookResponse.model_validate(book) for book in result.scalars().all()]
     return templates.TemplateResponse("index.html", {"request": request, "result":books})
 
-@app.post('/register')
-async def register(session:SessionDep, data:UserLoginModel):
+@app.get('/register', response_class=HTMLResponse)
+async def register_get(request: Request):
+    return templates.TemplateResponse("sign-in.html", {"request": request, "title": "Please register", "method":"/register"})
+
+@app.post('/register',)
+async def register(session:SessionDep, responce:Response, username: str = Form(), password: str = Form()):
     new_user = UserModel(
-        name = data.username,
-        password = data.password
+        name = username,
+        password = password
     )
     session.add(new_user)
     await session.commit()
-    return {"success":True, "message":"User "+data.username+" added"}
+    responce.headers["Location"] = "/login"
+    responce.status_code = 303
+    
+    return responce, {"success":True, "message":"User "+username+" added"}
+
+@app.get('/login', response_class=HTMLResponse)
+async def login_get(request: Request):
+    return templates.TemplateResponse("sign-in.html", {"request": request, "title": "Please Sign in", "method":"/login"})
 
 @app.post('/login')
-async def login(responce:Response ,session:SessionDep, cred:UserLoginModel):
-    user_result = await session.execute(select(UserModel).filter_by(name=cred.username))
+async def login(responce:Response ,session:SessionDep, username: str = Form(), password: str = Form()):
+    user_result = await session.execute(select(UserModel).filter_by(name=username))
     user = user_result.scalars().first()
+
+    print(username)
 
     if user is None:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     
-    if user.password == cred.password:
+    if user.password == password:
         token = security.create_access_token(uid=str(user.id))
         responce.set_cookie(config.JWT_ACCESS_COOKIE_NAME, token)
-        return {"access_token": token}
+        responce.status_code=303
+        responce.headers["Location"] = "/"
+
+        return responce
     else:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
 
 @app.post('/books', dependencies=[Depends(security.access_token_required)])
-async def create_book(data: NewBook, session: SessionDep):
+async def create_book(data: Book, session: SessionDep):
     new_book = BookModel(
         title=data.title,
         author=data.author,
-        date=data.date,
     )
     session.add(new_book)
     await session.commit()
@@ -130,6 +127,34 @@ async def get_books(session: SessionDep):
     result = await session.execute(query)
     # print (result.scalars().all())
     return result.scalars().all()
+
+@app.post('/upload')
+async def upload(
+    session: SessionDep,
+    title: str = Form(),
+    author: str = Form(),
+    desc: Optional[str] = Form(),
+    file: UploadFile = File(),
+):
+    allowed_types = ["pdf", "docx"]
+    file_type = get_file_type(str(file.filename))
+
+    if file_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="File type not allowed")
+    
+    file_path = save_uploaded_file(file)
+
+    book_data = Book(
+        title=title,
+        author=author,
+        description=desc
+    )
+
+    db_book = await create_book(session=session, file_path=file_path, file_type=file_type, data=book_data, )
+
+    return db_book
+
+    
 
 if __name__ == "__main__": 
     uvicorn.run("main:app", reload=True)
