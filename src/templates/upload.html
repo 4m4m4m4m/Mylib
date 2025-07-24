@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+
+{% block title %}
+    Upload
+{% endblock %}
+
+{% block body %}
+    <div class="container">
+        <form action="/upload", method="post", enctype="multipart/form-data">
+            <label class="form-lable">Title</label>
+            <input type="title" name="title" class="form-control" required>
+            <label class="form-lable">Author</label>
+            <input type="author" name="author" class="form-control" required>
+            <label class="form-lable">Description</label>
+            <input type="description" name="desc" class="form-control">
+            <label class="form-lable">Upload</label>
+
+            <input type="file" name="file" id="file" class="form-control" accept=".pdf,.docx" required>
+            <input type="submit" value="Upload" name="submit" class="btn btn-primary" >
+        </form>
+    </div>
+{% endblock %}

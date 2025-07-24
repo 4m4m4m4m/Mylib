@@ -8,12 +8,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy import select
 from pydantic import BaseModel
 from datetime import date
-from schemas import *
-from utils import *
 from typing import Annotated, Optional
 from models.mainModels import *
 from pathlib import Path
 from authx import AuthX, AuthXConfig
+from utils import *
+from schemas import *
+from crud import *
 
 # DB init
 engine = create_async_engine('sqlite+aiosqlite:///src/books.db')
@@ -56,7 +57,7 @@ security = AuthX(config=config)
 async def index(request: Request, session: SessionDep):
     query = select(BookModel)
     result = await session.execute(query)
-    books = [BookResponse.model_validate(book) for book in result.scalars().all()]
+    books = [BookResponse.model_validate(book, from_attributes=True) for book in result.scalars().all()]
     return templates.TemplateResponse("index.html", {"request": request, "result":books})
 
 @app.post('/', response_class=HTMLResponse)
@@ -66,7 +67,7 @@ async def index_post(request: Request, session: SessionDep, search: Annotated[st
     else:
         query = select(BookModel).filter(BookModel.title.contains(search))
     result = await session.execute(query)
-    books = [BookResponse.model_validate(book) for book in result.scalars().all()]
+    books = [BookResponse.model_validate(book, from_attributes=True) for book in result.scalars().all()]
     return templates.TemplateResponse("index.html", {"request": request, "result":books})
 
 @app.get('/register', response_class=HTMLResponse)
@@ -110,26 +111,13 @@ async def login(responce:Response ,session:SessionDep, username: str = Form(), p
     else:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
+@app.get('/upload', dependencies=[Depends(security.access_token_required)])
+async def upload_get(request: Request):
+    return templates.TemplateResponse("upload.html", {"request":request})
 
-@app.post('/books', dependencies=[Depends(security.access_token_required)])
-async def create_book(data: Book, session: SessionDep):
-    new_book = BookModel(
-        title=data.title,
-        author=data.author,
-    )
-    session.add(new_book)
-    await session.commit()
-    return {"success": True, "message": "Book "+data.title+" added"}
-
-@app.get('/books')
-async def get_books(session: SessionDep):
-    query = select(BookModel)
-    result = await session.execute(query)
-    # print (result.scalars().all())
-    return result.scalars().all()
-
-@app.post('/upload')
+@app.post('/upload', dependencies=[Depends(security.access_token_required)])
 async def upload(
+    responce: Response,
     session: SessionDep,
     title: str = Form(),
     author: str = Form(),
@@ -144,17 +132,30 @@ async def upload(
     
     file_path = save_uploaded_file(file)
 
-    book_data = Book(
+    book_data = NewBookSchema(
         title=title,
         author=author,
         description=desc
     )
 
-    db_book = await create_book(session=session, file_path=file_path, file_type=file_type, data=book_data, )
+    db_book = await create_book(session=session, file_path=file_path, file_type=file_type, data=book_data)
 
-    return db_book
+    responce.headers['Location'] = "/"
+    responce.status_code=303
+    return responce, db_book
 
+@app.get('/{book_id}/content', response_class=HTMLResponse)
+async def get_books_get(session: SessionDep, book_id: int, request:Request):
+    db_book = await get_book(book_id=book_id, session=session)
+
+
+    if db_book is None:
+        raise HTTPException(status_code=404, detail="Book "+ str(book_id) +" not found")
     
+    db_book = db_book[0]
+    content = extract_text_from_file(str(db_book.file_path), str(db_book.file_type))
+
+    return templates.TemplateResponse("content.html", {"request":request,"book":db_book, "content":content})
 
 if __name__ == "__main__": 
     uvicorn.run("main:app", reload=True)
